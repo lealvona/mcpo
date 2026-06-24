@@ -8,9 +8,14 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
 
+import re
+
 import uvicorn
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
 from mcp import ClientSession, StdioServerParameters
@@ -30,6 +35,58 @@ from mcpo.utils.config_watcher import ConfigWatcher
 
 
 logger = logging.getLogger(__name__)
+
+
+# Paths the filesystem MCP tool is never allowed to receive.
+# The @modelcontextprotocol/server-filesystem is already sandboxed to its
+# declared root, but this middleware provides a deterministic HTTP-layer gate
+# that fires before any call reaches the MCP process.
+_FS_BLOCKED = re.compile(
+    r'^(?:/etc/|/home/|/root/|/var/|/usr/|/tmp/|/opt/|/proc/|/sys/|/dev/|/run/'
+    r'|~/'        # shell tilde
+    r'|\.\./'     # traversal
+    r'|\.\.\\)'   # Windows traversal
+)
+
+# Filesystem tool argument names that carry path values
+_PATH_ARGS = frozenset({'path', 'paths', 'source', 'destination'})
+
+
+class FilesystemPathGuardMiddleware(BaseHTTPMiddleware):
+    """Block MCP filesystem tool calls that supply absolute system paths.
+
+    Any argument in _PATH_ARGS whose value matches _FS_BLOCKED is rejected
+    with HTTP 403 before the call reaches the MCP server process.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method == 'POST':
+            body = await request.body()
+            try:
+                data = json.loads(body)
+                for key, val in data.items():
+                    if key not in _PATH_ARGS:
+                        continue
+                    values = val if isinstance(val, list) else [val]
+                    for v in values:
+                        if isinstance(v, str) and _FS_BLOCKED.match(v):
+                            logger.warning(
+                                'FilesystemPathGuard: blocked path %r in arg %r', v, key
+                            )
+                            return JSONResponse(
+                                status_code=403,
+                                content={
+                                    'error': 'filesystem_path_blocked',
+                                    'detail': (
+                                        f'Absolute system paths are not accessible via the MCP '
+                                        f'filesystem tool. Use a relative path within the '
+                                        f'sandbox (e.g. "mame-tools/notes.md").'
+                                    ),
+                                },
+                            )
+            except (json.JSONDecodeError, AttributeError):
+                pass
+        return await call_next(request)
 
 
 class GracefulShutdown:
@@ -143,6 +200,11 @@ def create_sub_app(server_name: str, server_cfg: Dict[str, Any], cors_allow_orig
 
     if api_key and strict_auth:
         sub_app.add_middleware(APIKeyMiddleware, api_key=api_key)
+
+    # Gate filesystem calls: reject absolute system paths at the HTTP layer
+    # before any request reaches the sandboxed MCP process.
+    if server_name == 'filesystem':
+        sub_app.add_middleware(FilesystemPathGuardMiddleware)
 
     sub_app.state.api_dependency = api_dependency
     sub_app.state.connection_timeout = connection_timeout
