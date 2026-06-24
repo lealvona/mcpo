@@ -1,0 +1,70 @@
+{
+    "mcpServers":
+    {
+        "memory":
+        {
+            "command": "npx",
+            "args":
+            [
+                "-y",
+                "@modelcontextprotocol/server-memory"
+            ],
+ 	    "env": {
+        	"MEMORY_FILE_PATH": "/home/lvona/src/open-webui/.mcp/memory"
+      	    }
+        },
+        "time":
+        {
+            "command": "uvx",
+            "args":
+            [
+                "mcp-server-time",
+                "--local-timezone=America/New_York"
+            ]
+        },
+        "fetch":
+        {
+            "command": "uvx",
+            "args":
+            [
+                "mcp-server-fetch"
+            ]
+        },
+        "filesystem": {
+     	    "command": "npx",
+            "args": [
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/home/lvona/src/open-webui/.mcp/files"
+            ]
+        },
+        "sequential-thinking": {
+	    "command": "npx",
+	    "args": [
+		"-y",
+		"@modelcontextprotocol/server-sequential-thinking"
+            ]
+	},
+	"context7": {
+    	    "type": "stdio",
+      	    "command": "npx",
+      	    "args": [
+		"-y",
+		"@upstash/context7-mcp"
+	    ]
+    	},
+        "llmwiki": {
+            "type": "stdio",
+            "command": "/home/lvona/src/llmwiki/.venv/bin/python",
+            "args": [
+                "-m",
+                "local_server",
+                "--workspace",
+                "/home/lvona/src/open-webui/.mcp/llmwiki"
+            ],
+            "env": {
+                "PYTHONPATH": "/home/lvona/src/llmwiki/mcp"
+            }
+        }
+    }
+}
