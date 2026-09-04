@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 import socket
+import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
@@ -90,6 +91,49 @@ class FilesystemPathGuardMiddleware(BaseHTTPMiddleware):
             except (json.JSONDecodeError, AttributeError):
                 pass
         return await call_next(request)
+
+
+def _dunsinane_post(payload):
+    """Blocking POST to the fleet registrar; runs only on an executor thread."""
+    import http.client
+    try:
+        conn = http.client.HTTPConnection('127.0.0.1', 8620, timeout=1.0)
+        conn.request('POST', '/event', json.dumps(payload),
+                     {'Content-Type': 'application/json'})
+        conn.getresponse().read()
+        conn.close()
+    except Exception:
+        pass
+
+
+class DunsinaneObserveMiddleware(BaseHTTPMiddleware):
+    """Observe-only mirror to the Dunsinane fleet registrar (phase-2 chokepoint).
+
+    Records which MCP tool endpoint was called, by whom, with what outcome --
+    never the argument VALUES (tool args carry paths and content that must not
+    leave the request). The POST is scheduled on the default executor after the
+    response exists, so it adds no caller latency; every failure is swallowed.
+    The registrar being down must never affect a tool call.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        start = time.monotonic()
+        response = await call_next(request)
+        if request.method == 'POST':
+            try:
+                payload = {
+                    'span': 'mcpo', 'kind': request.url.path,
+                    'dur_ms': int((time.monotonic() - start) * 1000),
+                    'attrs': {
+                        'status': response.status_code,
+                        'client': request.client.host if request.client else None,
+                        'ua': (request.headers.get('user-agent') or '')[:120],
+                    },
+                }
+                asyncio.get_running_loop().run_in_executor(None, _dunsinane_post, payload)
+            except Exception:
+                pass
+        return response
 
 
 class GracefulShutdown:
@@ -893,6 +937,10 @@ async def run(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Observe-only fleet-registrar attribution (Dunsinane, phase 2). Wraps the
+    # main app so it sees every mounted sub-app; records POSTs (tool calls) only.
+    main_app.add_middleware(DunsinaneObserveMiddleware)
 
     # Add middleware to protect also documentation and spec
     if api_key and strict_auth:
